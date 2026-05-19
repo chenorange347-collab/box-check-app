@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>箱号核销</title>
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{padding:10px;background:#f5f5f5}
+        .card{background:white;padding:12px;border-radius:10px;margin-bottom:10px}
+        .btn{width:100%;padding:12px;margin:6px 0;border:none;border-radius:8px;background:#4CAF50;color:white;font-size:16px}
+        .scan{background:#FF9800}
+        .stat{display:flex;gap:5px;margin:10px 0}
+        .stat div{flex:1;background:#eef;padding:8px;border-radius:8px;text-align:center}
+        #video{width:100%;max-width:100%;height:auto;border-radius:8px;display:none;margin:10px 0;object-fit:cover}
+        #msg{padding:10px;background:white;border-radius:8px;margin:10px 0}
+        #list{height:240px;overflow-y:auto;background:white;padding:10px;border-radius:8px}
+        #log{height:150px;overflow-y:auto;background:white;padding:10px;border-radius:8px;margin-top:10px}
+        .ok{color:green}
+        .err{color:red}
+        .warn{color:orange}
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>📦 箱号扫码核销</h3>
+    <button class="btn" onclick="document.getElementById('file').click()">导入 Excel 出货单</button>
+    <input type="file" id="file" accept=".xlsx" style="display:none">
+    <div style="margin-top:8px">文件：<span id="fname">未导入</span></div>
+</div>
+
+<div class="stat">
+    <div>总箱<br><span id="t">0</span></div>
+    <div>已核销<br><span id="d">0</span></div>
+    <div>未核销<br><span id="u">0</span></div>
+</div>
+
+<button class="btn scan" onclick="scan()">📷 点击扫码</button>
+<video id="video" autoplay playsinline muted></video>
+<div id="msg">请导入单据后扫码</div>
+
+<div class="card">
+    <h4>核销清单</h4>
+    <div id="list"></div>
+</div>
+
+<div class="card">
+    <h4>操作日志</h4>
+    <div id="log"></div>
+</div>
+
+<script>
+let boxes = {};
+let log = [];
+let codeReader = null;
+
+// 导入Excel
+document.getElementById('file').onchange = function(e) {
+    let file = e.target.files[0];
+    document.getElementById('fname').innerText = file.name;
+    let reader = new FileReader();
+    reader.onload = ev => {
+        let wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+        let ws = wb.Sheets[wb.SheetNames[0]];
+        let data = XLSX.utils.sheet_to_json(ws);
+        boxes = {};
+        let col = "";
+        for (let k in data[0]) {
+            if (k.includes("Packing Number") || k.includes("PACKING NO") || k.includes("箱号")) col = k;
+        }
+        data.forEach(r => {
+            let v = String(r[col] || "").trim();
+            if (v.length > 3) boxes[v] = false;
+        });
+        refresh();
+        addLog("导入成功：" + Object.keys(boxes).length + " 个箱号");
+    };
+    reader.readAsArrayBuffer(file);
+};
+
+// 刷新统计和列表
+function refresh() {
+    let total = Object.keys(boxes).length;
+    let done = Object.values(boxes).filter(Boolean).length;
+    document.getElementById("t").innerText = total;
+    document.getElementById("d").innerText = done;
+    document.getElementById("u").innerText = total - done;
+    let html = "";
+    for (let k in boxes) {
+        html += boxes[k] ? `<div class="ok">✅ ${k}</div>` : `<div>⚫ ${k}</div>`;
+    }
+    document.getElementById("list").innerHTML = html;
+}
+
+// 添加日志
+function addLog(m) {
+    log.unshift(m);
+    let h = "";
+    log.slice(0, 30).forEach(s => h += `<div>${s}</div>`);
+    document.getElementById("log").innerHTML = h;
+}
+
+// 扫码核心（修复版）
+async function scan() {
+    try {
+        // 先停止之前的扫码
+        if (codeReader) {
+            codeReader.reset();
+        }
+
+        let video = document.getElementById("video");
+        video.style.display = "block";
+        document.getElementById("msg").innerText = "正在启动相机...";
+
+        codeReader = new ZXing.BrowserMultiFormatReader();
+
+        // 获取摄像头 → 强制使用后置摄像头
+        const devices = await codeReader.getVideoInputDevices();
+        let backCamera = devices.find(d =>
+            d.label.toLowerCase().includes("back") ||
+            d.label.toLowerCase().includes("后置") ||
+            d.label.toLowerCase().includes("rear")
+        ) || devices[0];
+
+        // 开始扫码
+        codeReader.decodeFromVideoDevice(
+            backCamera.deviceId,
+            video,
+            (result, err) => {
+                if (result) {
+                    // 扫码成功
+                    codeReader.reset();
+                    video.style.display = "none";
+                    check(result.text.trim());
+                }
+                // 忽略连续的错误日志，不影响使用
+            }
+        );
+
+    } catch (e) {
+        console.error("相机错误", e);
+        document.getElementById("msg").innerHTML = `<span class="err">❌ 相机启动失败：请开启权限</span>`;
+        addLog("错误：相机启动失败");
+        document.getElementById("video").style.display = "none";
+    }
+}
+
+// 核销校验
+function check(code) {
+    let t = new Date().toLocaleTimeString();
+    if (!boxes.hasOwnProperty(code)) {
+        document.getElementById("msg").innerHTML = `<span class="err">❌ ${code} 非本批次</span>`;
+        addLog(`[${t}] 错误：${code}`);
+        return;
+    }
+    if (boxes[code]) {
+        document.getElementById("msg").innerHTML = `<span class="warn">⚠️ ${code} 已核销</span>`;
+        addLog(`[${t}] 重复：${code}`);
+        return;
+    }
+    boxes[code] = true;
+    document.getElementById("msg").innerHTML = `<span class="ok">✅ ${code} 核销成功</span>`;
+    addLog(`[${t}] 成功：${code}`);
+    refresh();
+}
+</script>
+</body>
+</html>
